@@ -1,0 +1,20 @@
+# Big Data
+pyspark==3.5.3
+pyarrow>=15
+# Données et ML classique
+numpy>=1.26
+pandas>=2.1
+scikit-learn>=1.4
+# Visualisation
+matplotlib>=3.8
+seaborn>=0.13
+# Notebooks et configuration
+jupyterlab>=4
+pyyaml>=6
+# Deep learning (à choisir avec Ghada : garder une seule des deux lignes)
+torch>=2.2
+# tensorflow>=2.15
+# Qualité du code
+black>=24
+ruff>=0.4
+pytest>=8

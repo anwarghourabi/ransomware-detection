@@ -1,0 +1,15 @@
+# Chemins et paramètres partagés : ne jamais écrire de chemin en dur dans le code
+paths:
+  raw: data/raw
+  processed: data/processed
+  figures: reports/figures
+
+spark:
+  app_name: ransomware-detection
+  master: "local[*]"
+  driver_memory: 4g
+  shuffle_partitions: 8
+
+experiment:
+  seed: 42
+  prefix_fractions: [0.10, 0.25, 0.50, 0.75, 1.00]
