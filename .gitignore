@@ -4,6 +4,7 @@ data/processed/*
 !data/**/.gitkeep
 *.parquet
 *.csv
+!reports/*.csv
 *.zip
 *.tar.gz
 
