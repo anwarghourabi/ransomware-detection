@@ -9,6 +9,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from IPython.display import display
 
 ROOT = Path.cwd() if (Path.cwd() / "src").exists() else Path.cwd().parent
 sys.path.insert(0, str(ROOT))
