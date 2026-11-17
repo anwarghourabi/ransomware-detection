@@ -3,6 +3,8 @@
 Entrée : X (exécutions, fenêtres, features) déjà normalisé, longueurs réelles, étiquettes (tâche 6).
 Les séquences sont remplies de 0 à droite : les modèles utilisent les longueurs pour ignorer ce padding.
 Les LSTM / GRU sont unidirectionnels (lecture du passé vers le présent), comme pour une détection en ligne.
+Tâche 10 : MHSA-LSTM = LSTM + attention multi-têtes causale, avec option de pondération des
+features par gain d'information (Alqahtani et al. 2026).
 """
 import copy
 import random
@@ -11,7 +13,7 @@ import time
 import numpy as np
 import torch
 from torch import nn
-from torch.nn.utils.rnn import pack_padded_sequence
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
 def set_seed(seed=42):
@@ -56,12 +58,89 @@ class RNN(nn.Module):
         return self.head(h[-1]).squeeze(1)
 
 
+class AttnLSTM(nn.Module):
+    """MHSA-LSTM : LSTM, puis attention multi-têtes sur ses sorties.
+    - attention causale : la fenêtre t ne regarde que les fenêtres 1..t (pas le futur) ;
+    - le padding est masqué ;
+    - la prédiction vient de la dernière fenêtre réelle, qui « regarde » tout le passé.
+    feat_weights (optionnel) : un poids par feature (gain d'information), multiplié à l'entrée."""
+    def __init__(self, n_feat, hidden=64, heads=4, dropout=0.3, feat_weights=None):
+        super().__init__()
+        w = torch.ones(n_feat) if feat_weights is None else torch.as_tensor(feat_weights, dtype=torch.float32)
+        self.register_buffer("feat_w", w)
+        self.lstm = nn.LSTM(n_feat, hidden, batch_first=True)
+        self.attn = nn.MultiheadAttention(hidden, heads, dropout=dropout, batch_first=True)
+        self.norm = nn.LayerNorm(hidden)
+        self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(hidden, 1))
+        self.last_attn = None                                        # (B, T) : pour les figures
+
+    def forward(self, x, lengths):
+        T = x.size(1)
+        x = x * self.feat_w
+        packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        h, _ = pad_packed_sequence(self.lstm(packed)[0], batch_first=True, total_length=T)
+        pad = torch.arange(T, device=x.device)[None, :] >= lengths[:, None]          # True = padding
+        causal = torch.ones(T, T, dtype=torch.bool, device=x.device).triu(1)       # True = futur interdit
+        a, w = self.attn(h, h, h, key_padding_mask=pad, attn_mask=causal, need_weights=True)
+        z = self.norm(h + a)
+        last = (lengths - 1).clamp(min=0)
+        rows = torch.arange(x.size(0), device=x.device)
+        self.last_attn = w[rows, last].detach()                     # moyenne des têtes
+        return self.head(z[rows, last]).squeeze(1)
+
+
 def make_model(name, n_feat, **kw):
     if name == "CNN":
         return CNN1D(n_feat, **kw)
     if name in ("LSTM", "GRU"):
         return RNN(n_feat, kind=name.lower(), **kw)
+    if name.startswith("MHSA-LSTM"):
+        return AttnLSTM(n_feat, **kw)
     raise ValueError(name)
+
+
+def info_gain(X, lengths, y, idx, bins=10):
+    """Gain d'information de chaque feature (calculé sur le train seulement).
+    Chaque exécution est résumée par la moyenne de la feature sur ses fenêtres réelles,
+    découpée en `bins` classes (quantiles) ; IG = H(y) - H(y | classe)."""
+    idx = np.asarray(idx)
+    mask = np.arange(X.shape[1])[None, :] < lengths[idx, None]
+    m = (X[idx] * mask[..., None]).sum(1) / lengths[idx, None]
+    yy = np.asarray(y)[idx].astype(int)
+
+    def H(v):
+        p = np.bincount(v, minlength=2) / max(len(v), 1)
+        p = p[p > 0]
+        return -(p * np.log2(p)).sum()
+
+    ig = []
+    for j in range(m.shape[1]):
+        edges = np.unique(np.quantile(m[:, j], np.linspace(0, 1, bins + 1)[1:-1]))
+        c = np.digitize(m[:, j], edges)
+        ig.append(H(yy) - sum((c == k).mean() * H(yy[c == k]) for k in np.unique(c)))
+    return np.array(ig)
+
+
+def ig_weights(ig):
+    """Poids d'entrée : IG normalisé pour que la moyenne vaille 1 (une feature sans IG reste à 0.1)."""
+    w = np.asarray(ig) / max(np.mean(ig), 1e-12)
+    return np.clip(w, 0.1, None).astype(np.float32)
+
+
+def attention_profile(model, X, lengths, idx, n_bins=20, batch_size=256):
+    """Où regarde le modèle ? Attention de la dernière fenêtre, ramenée à 20 tranches de 5 %
+    de la séquence (0 = début, 1 = fin). Renvoie une matrice (exécutions, n_bins)."""
+    model.eval()
+    out = []
+    with torch.no_grad():
+        for b in _batches(np.asarray(idx), batch_size, False, None):
+            L = int(lengths[b].max())
+            model(torch.from_numpy(X[b, :L]), torch.from_numpy(lengths[b]).long())
+            w = model.last_attn.numpy()
+            for i, n in enumerate(lengths[b]):
+                pos = np.minimum((np.arange(n) / n * n_bins).astype(int), n_bins - 1)
+                out.append(np.bincount(pos, weights=w[i, :n], minlength=n_bins))
+    return np.array(out)
 
 
 # ---------- 2. entraînement ----------
