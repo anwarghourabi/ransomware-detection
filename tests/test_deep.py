@@ -37,3 +37,15 @@ def test_attention_is_causal_and_ig():
     p_pref1 = predict_proba(m, X, np.full(40, 6), [0])
     p_pref2 = predict_proba(m, X2, np.full(40, 6), [0])
     assert abs(p_pref1[0] - p_pref2[0]) < 1e-5 and p_full.shape == (1,)
+
+
+def test_multi_prefix_training_runs():
+    from src.models.deep import train
+    rng = np.random.default_rng(2)
+    X = rng.normal(size=(30, 20, 3)).astype(np.float32)
+    lengths = rng.integers(5, 21, size=30)
+    y = (np.arange(30) % 2).astype(np.float32)
+    m = train("LSTM", X, lengths, y, np.arange(20), np.arange(20, 30), epochs=2,
+              verbose=False, prefix_fracs=[0.1, 0.5, 1.0])
+    p = predict_proba(m, X, np.maximum(1, lengths // 2), np.arange(30))
+    assert p.shape == (30,) and np.all((p >= 0) & (p <= 1))

@@ -161,21 +161,42 @@ def predict_proba(model, X, lengths, idx, batch_size=256):
     return np.concatenate(out) if out else np.array([])
 
 
+def _prefix_len(lengths, frac):
+    return np.maximum(1, np.ceil(lengths * frac - 1e-9)).astype(lengths.dtype)
+
+
+def val_loss(model, X, lengths, y, val_idx, prefix_fracs=None):
+    """Perte BCE sur la validation ; avec prefix_fracs, moyenne sur ces fractions."""
+    yv = torch.from_numpy(y[val_idx]).float()
+    out = []
+    for f in (prefix_fracs or [1.0]):
+        lp = _prefix_len(lengths, f)
+        pv = torch.from_numpy(predict_proba(model, X, lp, val_idx)).clamp(1e-6, 1 - 1e-6)
+        out.append(nn.functional.binary_cross_entropy(pv, yv).item())
+    return float(np.mean(out))
+
+
 def train(name, X, lengths, y, train_idx, val_idx, seed=42, epochs=40, patience=6,
-          batch_size=64, lr=1e-3, weight_decay=1e-4, verbose=True, **model_kw):
-    """Entraîne avec arrêt précoce sur la perte de validation ; renvoie le meilleur modèle."""
+          batch_size=64, lr=1e-3, weight_decay=1e-4, verbose=True, prefix_fracs=None, **model_kw):
+    """Entraîne avec arrêt précoce sur la perte de validation ; renvoie le meilleur modèle.
+    - modèle « par fraction » : passer directement les longueurs du préfixe dans `lengths`
+      (les fenêtres après le préfixe sont ignorées par les modèles) ;
+    - modèle « multi-préfixes » : prefix_fracs=[0.1, 0.25, ...] ; à chaque batch, chaque
+      exécution est coupée à une fraction tirée au hasard dans cette liste."""
     set_seed(seed)
     rng = np.random.default_rng(seed)
     model = make_model(name, X.shape[2], **model_kw)
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = nn.BCEWithLogitsLoss()
     best, best_loss, wait = None, np.inf, 0
-    yv = torch.from_numpy(y[val_idx]).float()
     for ep in range(epochs):
         t = time.time(); model.train(); tot = 0.0
         for b in _batches(np.asarray(train_idx), batch_size, True, rng):
-            L = int(lengths[b].max())
-            xb = torch.from_numpy(X[b, :L]); lb = torch.from_numpy(lengths[b]).long()
+            lb = lengths[b]
+            if prefix_fracs:
+                lb = _prefix_len(lb, rng.choice(prefix_fracs, size=len(b)))
+            L = int(lb.max())
+            xb = torch.from_numpy(X[b, :L]); lb = torch.from_numpy(lb).long()
             yb = torch.from_numpy(y[b]).float()
             opt.zero_grad()
             loss = loss_fn(model(xb, lb), yb)
@@ -183,8 +204,7 @@ def train(name, X, lengths, y, train_idx, val_idx, seed=42, epochs=40, patience=
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             tot += loss.item() * len(b)
-        pv = torch.from_numpy(predict_proba(model, X, lengths, val_idx)).clamp(1e-6, 1 - 1e-6)
-        vloss = nn.functional.binary_cross_entropy(pv, yv).item()
+        vloss = val_loss(model, X, lengths, y, val_idx, prefix_fracs)
         if verbose:
             print(f"  {name} ép. {ep + 1:2d}  perte train {tot / len(train_idx):.4f}  "
                   f"perte val {vloss:.4f}  ({time.time() - t:.1f} s)")
