@@ -33,3 +33,4 @@ mlruns/
 .vscode/
 .idea/
 .DS_Store
+models/
